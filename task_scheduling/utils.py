@@ -55,6 +55,44 @@ from mpl_toolkits.mplot3d import Axes3D
 np.set_printoptions(precision=3, suppress=True)
 np.random.seed(42)
 
+def cartesian(arrays, out=None):
+    """Generate a cartesian product of input arrays."""
+    arrays = [np.asarray(x) for x in arrays]
+    dtype = arrays[0].dtype
+
+    n = np.prod([x.size for x in arrays])
+    if out is None:
+        out = np.zeros([n, len(arrays)], dtype=dtype)
+
+    m = n / arrays[0].size
+    out[:,0] = np.repeat(arrays[0], m)
+    
+    if arrays[1:]:
+        cartesian(arrays[1:], out=out[0:m,1:])
+        
+        for j in xrange(1, arrays[0].size):
+            out[j*m:(j+1)*m,1:] = out[0:m,1:]
+            
+    return out
+
+def calculate_distances(nodes):
+    n = np.atleast_2d(nodes).shape[0]
+    distances = np.zeros((n, n))
+
+    for k in xrange(n):
+        for p in xrange(n):
+            distances[k, p] = np.linalg.norm(nodes[k, :] - nodes[p, :])
+
+    return distances
+
+def generate_random_grid(n_rows=4, n_cols=5, lb=-50, ub=50, dims=2, **kwargs):
+    n_ips = n_rows * n_cols
+    a = np.linspace(lb, ub, n_rows)
+    b = np.linspace(2 * lb, 2 * ub, n_cols)
+
+    ips = cartesian([a, b]) + 10 * np.random.random((n_ips, 2))
+
+    return ips
 
 def generate_nodes(n=20, lb=-50, ub=50, dims=2, **kwargs):
     """Generate a random set of `n` nodes of `dims` coordinates using a discrete uniform distribution (lb, ub].
@@ -84,18 +122,6 @@ def generate_nodes(n=20, lb=-50, ub=50, dims=2, **kwargs):
 
     """
     return np.random.randint(lb, ub, (n, dims))
-
-
-def calculate_distances(nodes):
-    n = np.atleast_2d(nodes).shape[0]
-    distances = np.zeros((n, n))
-
-    for k in xrange(n):
-        for p in xrange(n):
-            distances[k, p] = np.linalg.norm(nodes[k, :] - nodes[p, :])
-
-    return distances
-
 
 def solve_problem(solver, cost, **kwargs):
     """Generic wrapper for library solvers. Useful for command-line examples or tests.

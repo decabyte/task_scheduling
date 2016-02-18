@@ -117,6 +117,11 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
         A gurobi model object.
     """
 
+    # extra options
+    output_flag = int(kwargs.get('output_flag', 0))
+    time_limit = float(kwargs.get('time_limit', 60.0))
+    w_coeff = kwargs.get('w_coeff', None)
+
     # Number of points
     n = cost.shape[0]
 
@@ -136,29 +141,46 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
     # Create the vertices set
     V = set(range(n))
 
-    m = Model()
-
     # Create model variables
+    m = Model()
     e_vars = {}
+    u_vars = {}
+
     for i in V:
         for j in V:
             e_vars[i, j] = m.addVar(vtype=GRB.BINARY, name='e_' + str(i) + '_' + str(j))
+
     m.update()
 
     for i in V:
         e_vars[i, i].ub = 0
-    m.update()
-
-    u_vars = {}
+    
     for i in V:
         u_vars[i] = m.addVar(vtype=GRB.INTEGER, name='u_' + str(i))
+
     m.update()
 
     # Set objective function (0)
     expr = 0
+
+    # standard formulation
     for i in V:
         for j in V:
-            expr += profit[i] * e_vars[i, j]
+            expr += profit[j] * e_vars[i, j]
+
+    # (optional) correlated formulation
+    if w_coeff is not None:
+        x_expr = []
+
+        for j in V:
+            x_j = quicksum(e_vars[i, j] for i in V)
+            x_expr.append(x_j)
+
+        for i in V:
+            for j in V:                
+                if w_coeff[i, j] > 0.1:
+                    expr += profit[j] * w_coeff[i, j] * x_expr[i] * (x_expr[i] - x_expr[j])
+
     m.setObjective(expr, GRB.MAXIMIZE)
     m.update()
 
@@ -193,9 +215,11 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
 
     # Add cost constraints (3)
     expr = 0
+
     for i in V:
         for j in V:
             expr += cost[i, j] * e_vars[i, j]
+
     m.addConstr(expr <= cost_max, "max_energy")
     m.update()
 
@@ -203,15 +227,20 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
     for i in V:
         u_vars[i].lb = 0
         u_vars[i].ub = n
+
     m.update()
 
     # Add subtour constraint (5)
     for i in V:
         for j in V:
-            m.addConstr(u_vars[i] - u_vars[j] + 1, GRB.LESS_EQUAL, (n - 1)*(1 - e_vars[i, j]),
-                        "sec_" + str(i) + "_" + str(j))
+            m.addConstr(
+                u_vars[i] - u_vars[j] + 1, GRB.LESS_EQUAL, (n - 1)*(1 - e_vars[i, j]), 
+                "sec_" + str(i) + "_" + str(j)
+            )
+
     m.update()
 
+    # Model Variables
     m._n = n
     m._eVars = e_vars
     m._uVars = u_vars
@@ -219,25 +248,52 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
     m._idxFinish = idx_finish
     m.update()
 
-    m.params.OutputFlag = int(kwargs.get('output_flag', 0))
-    m.params.TimeLimit = float(kwargs.get('time_limit', 60.0))
+    m.params.OutputFlag = output_flag
+    m.params.TimeLimit = time_limit
     m.params.LazyConstraints = 1
     m.optimize(_callback)
 
     solution = m.getAttr('X', e_vars)
-    # u = m.getAttr('X', u_vars)
     selected = [(i, j) for i in V for j in V if solution[i, j] > 0.5]
 
-    # solmat = np.zeros((n, n))
-    # for k, v in solution.iteritems():
-    #     solmat[k[0], k[1]] = v
+    # (optinal) show solution info
+    if output_flag > 0:
+        solmat = np.zeros((n, n), dtype=np.int)
+        othmat = np.zeros((n, n))
+        ulist = np.zeros(n)
+        x_expr = []
 
-    # print("\n")
-    # print(solmat)
-    # print(u)
-    # print(selected)
-    # print(sum(cost[s[0], s[1]] for s in selected))
+        for k, var in m._uVars.iteritems():
+            ulist[k] = var.X
 
+        upairs = sorted(range(len(ulist)), key=lambda k: ulist[k])
+
+        for k, v in solution.iteritems():
+            solmat[k[0], k[1]] = v
+
+        for j in V:
+            x_j = sum(solution[i, j] for i in V)
+            x_expr.append(x_j)
+
+        print('')
+        print('Solution Matrix:\n %s' % solmat)
+        print('Selected Route: %s' % selected)
+        print('Total Cost: %s' % sum(cost[s[0], s[1]] for s in selected))
+        print('uVars: %s' % ulist)
+        print('uVars pairs: %s' % upairs)
+        print('')
+
+        if w_coeff is not None:
+            for i in V:
+                for j in V:
+                    othmat[i, j] = profit[j] * w_coeff[i, j] * x_expr[i] * (x_expr[i] - x_expr[j])
+
+            print('X-expression: %s' % x_expr)
+            print('C-matrix:\n %s' % othmat)
+            print('')
+
+
+    # calculate output route
     route = []
     next_city = idx_start
 
@@ -255,13 +311,52 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
 
 
 def main():
+    import argparse
     import matplotlib.pyplot as plt
     import task_scheduling.utils as tsu
+    
+    np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
 
-    nodes = tsu.generate_nodes()
+    # see: https://mkaz.github.io/2014/07/26/python-argparse-cookbook/
+    parser = argparse.ArgumentParser(description='Orienteering Problem.')
+    parser.add_argument('rows', metavar='M', type=int, default=3, help='number of rows')
+    parser.add_argument('cols', metavar='N', type=int, default=4, help='number of columns')
+    parser.add_argument('cmax', metavar='C', type=int, default=500, nargs='?', help='maximum cost')
+
+    parser.add_argument('--correlated', '-C', action='store_true', help='correlated formulation')
+    parser.add_argument('--verbose', '-v', action='store_true', help='verbose flag')
+    args = parser.parse_args()
+
+    if args.verbose:
+        output_flag = 1
+    else:
+        output_flag = 0
+
+    # generate problem
+    nodes = tsu.generate_random_grid(args.rows, args.cols)      # tsu.generate_nodes(n=args.nodes)
     cost = tsu.calculate_distances(nodes)
 
-    solution, objective, _ = tsu.solve_problem(op_solver, cost)
+    if args.correlated:
+        w_coeff = np.zeros_like(cost)
+
+        # weighting
+        d_max = 100
+        g_cor = d_max / 3.0
+        dist = tsu.calculate_distances(nodes)
+
+        w_coeff = np.exp(-(dist / g_cor)**2)
+        # w_coeff = np.clip(-0.01 * dist + 1, 0.0, 1.0)
+
+        # zero-diag
+        w_coeff[np.diag_indices(w_coeff.shape[0])] = 0.0
+    else:
+        w_coeff = None
+
+    solution, objective, _ = tsu.solve_problem(
+        op_solver, cost, 
+        cost_max=args.cmax, w_coeff=w_coeff,
+        output_flag=output_flag, time_limit=30.0
+    )
 
     fig, ax = tsu.plot_problem(nodes, solution, objective)
     plt.show()
