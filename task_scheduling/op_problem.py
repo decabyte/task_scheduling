@@ -177,9 +177,12 @@ def op_solver(cost, profit=None, cost_max=None, idx_start=None, idx_finish=None,
             x_expr.append(x_j)
 
         for i in V:
-            for j in V:                
+            for j in V:
                 if w_coeff[i, j] > 0.1:
-                    expr += profit[j] * w_coeff[i, j] * x_expr[i] * (x_expr[i] - x_expr[j])
+                    expr += profit[j] * w_coeff[i, j] * x_expr[i] * (1 - x_expr[j])
+
+                    # not working investigate:
+                    #expr += (1 - e_vars[i, j]) * profit[j] * w_coeff[i, j] * (1 - x_expr[j])
 
     m.setObjective(expr, GRB.MAXIMIZE)
     m.update()
